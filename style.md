@@ -1557,7 +1557,237 @@ type Client struct {
 </td></tr>
 </tbody></table>
 
-### Use Field Names to initialize Structs
+As a general rule of thumb, embedding should not make types more difficult to
+use, and should be viewed as an "is-a" declaration: the embedding (outer) type
+can function as the embedded (inner) type, and therefore "is a" form of the
+inner type. A type embedding a `sync.Mutex` declares to users that it "is a"
+mutex; a type embedding a `bytes.Buffer` declares that it "is a" buffer.
+
+Embedded types' methods or fields should never be shadowed by first-class
+methods or fields defined as part of the embedding type, and embedding should
+never be used for callsite brevity or other cosmetic convenience.
+
+When embedding, visibility and type semantics should be taken into account:
+because exported fields and methods of an embedded type will also be exported
+by the embedding type, careless use can bleed implementation details through
+types' API boundaries, expose internal type faculties that can be used in an
+unsafe or unknown way, or change the semantics of the embedding type altogether.
+
+All of the guidance in this section applies primarily to embedding types that
+are either (a) exported or (b) unexported but conventionally satisfy public
+interfaces, especially if the embedding type can be trivially type-converted to
+an interface that the embedded type satsfies.
+
+#### Embedding Should Not Affect Useful Zero Values
+
+If a given embedding (outer) type has a useful zero value (e.g. `bytes.Buffer`),
+an embedded type should not cause the outer type to no longer be useful as a
+zero value. Similarly, if an outer type can be used as a value type or otherwise
+be trivially struct-initialized, embedded types should be optional or
+lazily-populated in order to minimize initialization complexiy of
+secondary (embedded) types or fields.
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Book struct {
+    io.ReadWriter
+
+    // other fields
+}
+
+// later
+
+var b Book
+b.Read(...)  // panic
+b.String()   // panic
+b.Write(...) // panic
+```
+
+</td><td>
+
+```go
+type Book struct {
+    bytes.Buffer
+
+    // other fields
+}
+
+// later
+
+var b Book
+b.Read(...)  // ok
+b.String()   // ok
+b.Write(...) // ok
+```
+
+</td></tr>
+</tbody></table>
+
+#### Embedding Should Not Change Type Semantics
+
+An embedded (inner) type should not add semantically unrelated or extraneous
+methods or fields to the embedding (outer) type's exported API, nor should it
+add methods or fields that imply that the type behaves other than explicitly
+defined. This applies both to newly-available (via embedding) and "shadowed"
+methods and fields.
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Car struct {
+    io.ReadWriteCloser
+    sync.Locker
+
+    // other fields
+}
+
+// Close closes the indicated door.
+func (c *Car) Close(d Door) error {
+    c.Locker.Lock()
+    defer c.Locker.Unlock()
+
+    // ...
+}
+
+// Lock locks c's doors.
+func (c *Car) Lock() error {
+    c.Locker.Lock()
+    defer c.Locker.Unlock()
+
+    // ...
+}
+
+// Unlock unlocks c's doors.
+func (c *Car) Unlock() error {
+    c.Locker.Lock()
+    defer c.Locker.Unlock()
+
+    // ...
+}
+
+// later, in user code...
+
+c.Lock()        // Bad: unclear intent
+c.Locker.Lock() // Bad: accesses internals
+c.Read(...)     // Bad: Car is not semantically an io.Reader
+```
+
+</td><td>
+
+```go
+type Car struct {
+    buf    bytes.Buffer
+    locker sync.Locker
+    // other fields
+}
+
+// Close closes the indicated door.
+func (c *Car) Close(d Door) error {
+    // ...
+}
+
+// Lock locks c's doors.
+func (c *Car) Lock() error {
+    c.locker.Lock()
+    defer c.locker.Unlock()
+
+    // ...
+}
+
+// later, in user code...
+
+c.Lock()        // Good: unambiguous
+c.locker.Lock() // Good: is not visible to users
+c.buf.Read()    // Good: is not visible to users
+```
+
+</td></tr>
+</tbody></table>
+
+#### Embedding Should Not Expose Implementation Details
+
+An embedded type should not expose controls, mechanics, internal details, or
+other information/access outside of what is already explicitly available
+through the embedding type's API. In those cases, the inner type should be an
+unexported field instead.
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Client struct {
+    sync.Mutex
+    sync.WaitGroup
+    bytes.Buffer
+    url.URL
+}
+```
+
+</td><td>
+
+```go
+type Client struct {
+    mtx sync.Mutex
+    wg  sync.WaitGroup
+    buf bytes.Buffer
+    url url.URL
+}
+```
+
+</td></tr>
+</tbody></table>
+
+#### Embedding Values vs Pointers vs Interfaces
+
+Prefer embedding value types where possible (if the type's zero value is
+useful); otherwise, always embed a canonically-constructed type (the type
+returned by its constructor(s)). Never share embedded pointers between outer
+values.
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Foo struct {
+    *bytes.Buffer // Bad: has useful zero value
+    time.Ticker   // Bad: non-canonical
+}
+```
+
+</td><td>
+
+```go
+type Foo struct {
+    bytes.Buffer
+    *time.Ticker
+}
+```
+
+</td></tr>
+</tbody></table>
+
+When choosing between values, pointers, and interfaces, be aware of both the
+embedding (outer) and embedded (inner) types' copy semantics. For example, if
+the outer type is trivially copyable, embedding a pointer or interface type
+could transparently cause subtle, insidious bugs for downstream users that
+are very difficult to detect.
+
+Embedding interfaces (including self-defined interfaces) may be preferable in
+order to control which embedded (inner) methods are exposed as part of the
+embedding (outer) type.
+
+### Use Field Names to Initialize Structs
 
 You should almost always specify field names when initializing structs. This is
 now enforced by [`go vet`].
